@@ -49,12 +49,12 @@ top-5 retrieved?
 
 | Metric | Value |
 |--------|-------|
-| recall@5 (overall) | **76.0% (19/25)** |
+| recall@5 (overall) | **92.0% (23/25)** |
 | AAPL | 8/8 |
-| MSFT | 7/8 |
-| NVDA | 4/9 |
+| MSFT | 8/8 |
+| NVDA | 7/9 |
 
-**How I got here — two rounds of measure-then-fix:**
+**How I got here — three rounds of measure-then-fix:**
 
 1. *Section splitting (33% → 67%).* The first run scored 33% on 3 NVDA
    questions. Inspecting the index showed mis-attributed spans — Item 7 (MD&A)
@@ -63,26 +63,34 @@ top-5 retrieved?
    the table of contents. Anchoring the regex to line-start headings fixed the
    boundaries (Item 7 → 73, Item 9A → 8) and recall rose to 67%.
 
-2. *Expanded to 25 questions / 3 companies (76%).* The breakdown exposed two
-   distinct, still-open failure modes:
-   - **Section imbalance (NVDA).** NVDA scores worst despite having the most
-     chunks. Its Item 1A is huge (226 chunks) and semantically overlaps smaller
-     sections (cybersecurity, capital), crowding them out of the top-5. Fix
-     direction: per-section retrieval quotas or a reranking pass.
-   - **Thin extraction (MSFT).** MSFT's primary doc is mostly iXBRL, so text
-     extraction is incomplete (115 chunks vs AAPL's 415). Its one miss (Item 7)
-     traces to that. Fix direction: pull the cleaner `.htm` exhibit instead.
+2. *Expanded to 25 questions / 3 companies (76%).* A bigger set exposed
+   **section imbalance**: NVDA scored worst (4/9) despite having the most chunks,
+   because its huge Item 1A (226 chunks) crowded smaller sections out of the
+   top-5. The bi-encoder kept returning near-duplicate Item 1A passages.
 
-One question (NVDA Item 3, Legal Proceedings) is a known stub — NVDA defers it
-to a financial-statements note, so there's nothing to retrieve. I keep it in
-rather than delete it to inflate the score.
+3. *MMR reranking (76% → 92%).* Added two-stage retrieval — over-fetch 40
+   candidates, then re-rank with Maximal Marginal Relevance to trade off
+   relevance against diversity (see [`retrieval.py`](retrieval.py)). NVDA rose
+   4/9 → 7/9 and MSFT 7/8 → 8/8. Diversity reranking recovered the crowded-out
+   sections without me optimizing the section label directly.
+
+The two remaining misses are both honest:
+- **NVDA Item 1C (cybersecurity).** Its Item 1A talks about cybersecurity *risk*
+  while the question asks about *governance* — a genuine semantic-overlap case
+  the bi-encoder + MMR still gets wrong. A cross-encoder reranker is the likely
+  next lever.
+- **NVDA Item 3 (Legal Proceedings).** A one-line stub deferring to a
+  financial-statements note — nothing substantive to retrieve. Kept in the set
+  rather than deleted to inflate the score.
 
 ## Architecture
 
 ```
 ticker ──> EDGAR API ──> section-aware parse ──> chunk ──> Chroma (local embeddings)
                                                               │
-question ──> agent (Claude + retrieve tool) ──> cited answer ─┘
+question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> MMR rerank ──> top 5
+                  │                                                            │
+                  └──────────────────── cited answer ◄────────────────────────┘
 ```
 
 | File | Job |
@@ -90,10 +98,14 @@ question ──> agent (Claude + retrieve tool) ──> cited answer ─┘
 | `ingest/edgar.py` | Map ticker → CIK, pull 10-K/10-Q from EDGAR |
 | `ingest/parse.py` | HTML → section-keyed text |
 | `index/build_index.py` | Chunk + embed → Chroma |
+| `retrieval.py` | Two-stage search: over-fetch + MMR rerank (shared by eval and agent) |
 | `agent/tools.py` | `retrieve` tool with citation metadata |
 | `agent/research_agent.py` | Tool-calling agent (Claude) |
 | `eval/evaluate.py` | recall@k retrieval eval |
 | `app.py` | Streamlit UI |
+
+The eval and the agent both retrieve through `retrieval.py`, so the number the
+eval reports is the retrieval the agent actually gets — they can't drift.
 
 Embeddings run locally (Chroma's default `all-MiniLM-L6-v2`), so the only API
 key you need is Anthropic's.
@@ -117,16 +129,17 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 - Section splitting is regex-based on "Item N" headers. Some 10-Qs and older
   filings format headers oddly and fall back to a single `full_document`
   section — chunking still works but citations are coarser.
-- The eval set is small (3 seed questions). recall@k is only as meaningful as
-  the labels behind it; expanding this is the next priority.
-- No cross-filing dedup: if you index overlapping amendments you may retrieve
-  near-duplicate passages.
+- The eval set is 25 questions over 3 companies. recall@k is only as meaningful
+  as the labels behind it; broadening coverage is ongoing.
+- Bi-encoder + MMR still misses pure semantic-overlap cases (NVDA Item 1C vs
+  1A). A cross-encoder reranker is the next lever.
+- MSFT's iXBRL primary doc extracts thinner than AAPL/NVDA's; MMR masks it in
+  the eval but a cleaner source would be better.
 
 ## Next
 
-- [x] Section-aware splitting + 25-question eval across 3 companies (recall@5 76%)
-- [ ] Address section imbalance (per-section retrieval quota or a reranker) —
-      targets the NVDA misses
-- [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL —
-      targets the MSFT extraction gap
+- [x] Section-aware splitting + 25-question eval across 3 companies
+- [x] MMR reranking to fix section imbalance (recall@5 76% → 92%)
+- [ ] Cross-encoder reranker for semantic-overlap cases (NVDA Item 1C)
+- [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL
 - [ ] Add a sources panel in the UI that links to the EDGAR document

@@ -17,7 +17,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from index.build_index import get_collection
+from retrieval import search
 
 # Each: question + the (ticker, section) a correct answer must come from.
 # Section labels must match parse.py output ("Item 1A", "Item 7", ...).
@@ -61,19 +61,13 @@ EVAL_QUESTIONS = [
 
 
 def recall_at_k(k: int = 5) -> None:
-    collection = get_collection()
     hits = 0
 
     print(f"{'hit':<4} {'ticker':<6} {'section':<10} question")
     print("-" * 70)
     for item in EVAL_QUESTIONS:
-        res = collection.query(
-            query_texts=[item["q"]],
-            n_results=k,
-            where={"ticker": item["ticker"]},
-        )
-        metas = res.get("metadatas", [[]])[0]
-        hit = any(m.get("section") == item["section"] for m in metas)
+        results = search(item["q"], k=k, where={"ticker": item["ticker"]})
+        hit = any(h["metadata"].get("section") == item["section"] for h in results)
         hits += int(hit)
         print(f"{'  ✓' if hit else '  ✗':<4} {item['ticker']:<6} {item['section']:<10} {item['q'][:45]}")
 

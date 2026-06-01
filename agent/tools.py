@@ -9,7 +9,7 @@ research tool and a chatbot that sounds confident.
 
 from langchain_core.tools import tool
 
-from index.build_index import get_collection
+from retrieval import search
 
 
 def _format_hit(doc: str, meta: dict) -> str:
@@ -24,12 +24,8 @@ def retrieve(query: str, k: int = 5) -> str:
     Use this for any question about a company's filings. Returns the top
     passages, each prefixed with its citation (ticker, form, date, section).
     """
-    collection = get_collection()
-    res = collection.query(query_texts=[query], n_results=k)
-
-    docs = res.get("documents", [[]])[0]
-    metas = res.get("metadatas", [[]])[0]
-    if not docs:
+    hits = search(query, k=k)
+    if not hits:
         return "No relevant passages found. The filing may not be indexed yet."
 
-    return "\n\n---\n\n".join(_format_hit(d, m) for d, m in zip(docs, metas))
+    return "\n\n---\n\n".join(_format_hit(h["document"], h["metadata"]) for h in hits)
