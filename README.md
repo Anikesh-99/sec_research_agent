@@ -11,9 +11,8 @@ them, and answers with citations like `[NVDA 10-K 2025-02-26 — Item 1A]` that
 you can verify against the source.
 
 > **Status:** the ingest → parse → index → eval pipeline runs end-to-end on
-> real NVDA filings (see results below). The agent + Streamlit layer are written
-> but I haven't exercised them on a large corpus yet. Eval set is small (3 seed
-> questions) and I'm expanding it.
+> real filings from three companies (see results below). The agent + Streamlit
+> layer are written but I haven't exercised them on a large corpus yet.
 
 ## Why section-aware chunking (not fixed-size splits)
 
@@ -43,25 +42,40 @@ in the top-k? That number is what I tune chunk size and overlap against.
 
 ### Results
 
-Corpus: NVDA's two most recent 10-Ks (filed 2026-02-25 and 2025-02-26), 690
-chunks.
+Corpus: two most recent 10-Ks each for NVDA, AAPL, and MSFT (~1,220 chunks).
+Eval: 25 questions, each labelled with the section a correct answer must come
+from. Metric is recall@5 — did a chunk from the expected section appear in the
+top-5 retrieved?
 
 | Metric | Value |
 |--------|-------|
-| recall@5 | 66.7% (2/3) |
-| # eval questions | 3 (seed; expanding) |
+| recall@5 (overall) | **76.0% (19/25)** |
+| AAPL | 8/8 |
+| MSFT | 7/8 |
+| NVDA | 4/9 |
 
-**What the first run taught me.** Initial recall@5 was 33% (1/3). Inspecting
-the index showed the section splitter was mis-attributing spans — Item 7 (MD&A)
-had only 17 chunks while Item 9A (normally tiny) had 142 — because the header
-regex matched *every* "Item N" string, including inline cross-references and the
-table of contents. Anchoring the pattern to line-start headings fixed the
-boundaries (Item 7 → 73 chunks, Item 9A → 8) and recall@5 rose to 67%.
+**How I got here — two rounds of measure-then-fix:**
 
-The remaining miss is honest, not a bug: NVDA's Item 3 (Legal Proceedings) is a
-one-line stub that defers to a financial-statements note, so there's no
-substantive passage to retrieve. I'm keeping that question in the set rather
-than deleting it to inflate the score.
+1. *Section splitting (33% → 67%).* The first run scored 33% on 3 NVDA
+   questions. Inspecting the index showed mis-attributed spans — Item 7 (MD&A)
+   had 17 chunks while Item 9A (normally tiny) had 142 — because the header
+   regex matched *every* "Item N" string, including inline cross-references and
+   the table of contents. Anchoring the regex to line-start headings fixed the
+   boundaries (Item 7 → 73, Item 9A → 8) and recall rose to 67%.
+
+2. *Expanded to 25 questions / 3 companies (76%).* The breakdown exposed two
+   distinct, still-open failure modes:
+   - **Section imbalance (NVDA).** NVDA scores worst despite having the most
+     chunks. Its Item 1A is huge (226 chunks) and semantically overlaps smaller
+     sections (cybersecurity, capital), crowding them out of the top-5. Fix
+     direction: per-section retrieval quotas or a reranking pass.
+   - **Thin extraction (MSFT).** MSFT's primary doc is mostly iXBRL, so text
+     extraction is incomplete (115 chunks vs AAPL's 415). Its one miss (Item 7)
+     traces to that. Fix direction: pull the cleaner `.htm` exhibit instead.
+
+One question (NVDA Item 3, Legal Proceedings) is a known stub — NVDA defers it
+to a financial-statements note, so there's nothing to retrieve. I keep it in
+rather than delete it to inflate the score.
 
 ## Architecture
 
@@ -110,6 +124,9 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 
 ## Next
 
-- [ ] Finalize eval set (~25 questions across tickers), report recall@5
-- [ ] Tune chunk size / overlap against that number
+- [x] Section-aware splitting + 25-question eval across 3 companies (recall@5 76%)
+- [ ] Address section imbalance (per-section retrieval quota or a reranker) —
+      targets the NVDA misses
+- [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL —
+      targets the MSFT extraction gap
 - [ ] Add a sources panel in the UI that links to the EDGAR document
