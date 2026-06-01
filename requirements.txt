@@ -1,0 +1,9 @@
+anthropic
+langchain
+langchain-anthropic
+chromadb
+beautifulsoup4
+lxml
+requests
+streamlit
+python-dotenv
