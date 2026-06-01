@@ -8,13 +8,19 @@ Risk Factors" instead of "chunk 47". That section metadata is the whole point.
 """
 
 import re
-from bs4 import BeautifulSoup
+import warnings
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
-# Canonical 10-K items we care about. The regex is deliberately loose because
-# filings format headers inconsistently ("ITEM 1A.", "Item 1A —", etc.).
+# Some filings' primary docs are iXBRL/XML; lxml still extracts the text fine,
+# so silence the cosmetic "parsed XML as HTML" warning.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+# Match "Item N" only when it begins a line (a real section heading), not when
+# it appears inline as a cross-reference like "see Item 8" or in the table of
+# contents. Anchoring on line starts is what keeps section boundaries sane.
 ITEM_PATTERN = re.compile(
-    r"\bITEM\s+(\d+[A-Z]?)\b[\.\:\-\—\s]*",
-    re.IGNORECASE,
+    r"^\s*ITEM\s+(\d+[A-Z]?)[\.\:\)\-\—\s]",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

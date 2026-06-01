@@ -10,10 +10,10 @@ The agent retrieves the relevant passages from real EDGAR filings, reasons over
 them, and answers with citations like `[NVDA 10-K 2025-02-26 — Item 1A]` that
 you can verify against the source.
 
-> **Status:** working scaffold. The ingest → parse → index pipeline and the
-> agent are written; I'm still expanding the eval set and tuning chunking. The
-> results table below is blank until I've run the eval on a fixed corpus — I'd
-> rather show a real number than a made-up one.
+> **Status:** the ingest → parse → index → eval pipeline runs end-to-end on
+> real NVDA filings (see results below). The agent + Streamlit layer are written
+> but I haven't exercised them on a large corpus yet. Eval set is small (3 seed
+> questions) and I'm expanding it.
 
 ## Why section-aware chunking (not fixed-size splits)
 
@@ -43,13 +43,25 @@ in the top-k? That number is what I tune chunk size and overlap against.
 
 ### Results
 
-_Run `python eval/evaluate.py` after indexing. Filling this in once the eval
-set is finalized:_
+Corpus: NVDA's two most recent 10-Ks (filed 2026-02-25 and 2025-02-26), 690
+chunks.
 
 | Metric | Value |
 |--------|-------|
-| recall@5 | _pending_ |
+| recall@5 | 66.7% (2/3) |
 | # eval questions | 3 (seed; expanding) |
+
+**What the first run taught me.** Initial recall@5 was 33% (1/3). Inspecting
+the index showed the section splitter was mis-attributing spans — Item 7 (MD&A)
+had only 17 chunks while Item 9A (normally tiny) had 142 — because the header
+regex matched *every* "Item N" string, including inline cross-references and the
+table of contents. Anchoring the pattern to line-start headings fixed the
+boundaries (Item 7 → 73 chunks, Item 9A → 8) and recall@5 rose to 67%.
+
+The remaining miss is honest, not a bug: NVDA's Item 3 (Legal Proceedings) is a
+one-line stub that defers to a financial-statements note, so there's no
+substantive passage to retrieve. I'm keeping that question in the set rather
+than deleting it to inflate the score.
 
 ## Architecture
 
