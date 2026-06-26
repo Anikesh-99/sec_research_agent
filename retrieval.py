@@ -45,25 +45,7 @@ def _embed_query(text: str) -> np.ndarray:
 def _normalize(v: np.ndarray) -> np.ndarray:
     return v / np.clip(np.linalg.norm(v, axis=-1, keepdims=True), 1e-12, None)
 
-def _mmr_search(query: str, k: int = 5, where: dict | None = None,
-               candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT) -> list[dict]:
-    """Return up to k hits as {document, metadata}, MMR-reranked for diversity."""
-    res = get_collection().query(
-        query_texts=[query],
-        n_results=candidates,
-        where=where,
-        include=["documents", "metadatas", "embeddings"],
-    )
-    docs = res["documents"][0]
-    metas = res["metadatas"][0]
-    embs = res["embeddings"][0]
-    if not docs:
-        return []
-
-    E = _normalize(np.asarray(embs, dtype=float))
-    q = _normalize(_embed_query(query))
-    relevance = E @ q  # cosine similarity to the query
-
+def _mmr_ranking(docs, metas, E, relevance, k, lambda_mult):
     selected: list[int] = []
     remaining = list(range(len(docs)))
     while remaining and len(selected) < k:
@@ -82,8 +64,28 @@ def _mmr_search(query: str, k: int = 5, where: dict | None = None,
 
     return [{"document": docs[i], "metadata": metas[i]} for i in selected]
 
-def _cross_encoder_search(query: str, k: int = 5, where: dict | None = None,
+def _mmr_search(query: str, k: int = 5, where: dict | None = None,
                candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT) -> list[dict]:
+    """Return up to k hits as {document, metadata}, MMR-reranked for diversity."""
+    res = get_collection().query(
+        query_texts=[query],
+        n_results=candidates,
+        where=where,
+        include=["documents", "metadatas", "embeddings"],
+    )
+    docs = res["documents"][0]
+    metas = res["metadatas"][0]
+    embs = res["embeddings"][0]
+    if not docs:
+        return []
+
+    E = _normalize(np.asarray(embs, dtype=float))
+    q = _normalize(_embed_query(query))
+    relevance = E @ q  # cosine similarity to the query
+    return _mmr_ranking(docs, metas, E, relevance, k, lambda_mult)
+    
+def _cross_encoder_search(query: str, k: int = 5, where: dict | None = None,
+               candidates: int = CANDIDATES) -> list[dict]:
     res = get_collection().query(
         query_texts=[query],
         n_results=candidates,
@@ -93,14 +95,34 @@ def _cross_encoder_search(query: str, k: int = 5, where: dict | None = None,
     ce = _cross_encoder()
     docs = res["documents"][0]
     meta = res["metadatas"][0]
+    embs = res["embeddings"][0]
     if not docs:
         return []
     pairs = [(query, doc) for doc in docs]
     scores = ce.predict(pairs)
-    chosen = sorted(zip(docs, meta, scores), key=lambda x: x[2], reverse = True)[:k]
-    chosen_docs, chosen_metas = [choice[0] for choice in chosen], [choice[1] for choice in chosen]
-    return [{"document": chosen_docs[i], "metadata": chosen_metas[i]} for i in range(len(chosen))]
+    chosen = sorted(zip(docs, meta, embs, scores), key=lambda x: x[3], reverse = True)[:k]
+    chosen_docs, chosen_metas, chosen_embs = [choice[0] for choice in chosen], [choice[1] for choice in chosen], [choice[2] for choice in chosen]
+    chosen_scores = [choice[3] for choice in chosen]
+    return [{"document": chosen_docs[i], "metadata": chosen_metas[i], "embedding": chosen_embs[i], "score": chosen_scores[i]} for i in range(len(chosen))]
+
+def _chain_search(query: str, k: int = 5, where: dict | None = None, candidates: int = CANDIDATES, 
+                  lambda_mult: float = LAMBDA_MULT, shortlist=15) -> list[dict]:
+    shortlisted_docs = _cross_encoder_search(query, shortlist, where, candidates)
+    embs = [doc["embedding"] for doc in shortlisted_docs]
+    docs = [doc["document"] for doc in shortlisted_docs]
+    metas = [doc["metadata"] for doc in shortlisted_docs]
+    E = _normalize(np.asarray(embs, dtype=float))
+    scores = np.array([doc["score"] for doc in shortlisted_docs])
+    relevance = (scores - scores.min())/(scores.max() - scores.min() + 1e-12)
+    return _mmr_ranking(docs, metas, E, relevance, k, lambda_mult)
 
 def search(query: str, k: int = 5, where: dict | None = None,
-           candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT, rerank: str = "MMR") -> list[dict]:
-    return _mmr_search(query, k, where, candidates, lambda_mult) if rerank == "MMR" else _cross_encoder_search(query, k, where, candidates, lambda_mult)
+           candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT, rerank: str = "MMR", shortlist: int = 20) -> list[dict]:
+    if rerank == "MMR":
+        return _mmr_search(query, k, where, candidates, lambda_mult)
+    elif rerank == "CROSS":
+        return _cross_encoder_search(query, k, where, candidates)
+    elif rerank == "CHAIN":
+        return _chain_search(query, k, where, candidates, lambda_mult, shortlist)
+    else:
+        raise ValueError("Invalid ranking type")

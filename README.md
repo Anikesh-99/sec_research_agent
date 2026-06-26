@@ -48,14 +48,14 @@ from. Metric is recall@5 — did a chunk from the expected section appear in the
 top-5 retrieved? Default retrieval is MMR; the cross-encoder is a selectable
 option (see below).
 
-| Metric | MMR (default) | Cross-encoder |
-|--------|--------------|---------------|
-| recall@5 (overall) | **88.9% (32/36)** | 83.3% (30/36) |
-| NVDA | 10/12 | 10/12 |
-| AAPL | 11/12 | 10/12 |
-| MSFT | 11/12 | 10/12 |
+| Metric | MMR (default) | Cross-encoder | Chain (CE→MMR) |
+|--------|--------------|---------------|----------------|
+| recall@5 (overall) | **88.9% (32/36)** | 83.3% (30/36) | 86.1% (31/36) |
+| NVDA | 10/12 | 10/12 | 11/12 |
+| AAPL | 11/12 | 10/12 | 10/12 |
+| MSFT | 11/12 | 10/12 | 10/12 |
 
-**How I got here — four rounds of measure-then-fix:**
+**How I got here — five rounds of measure-then-fix:**
 
 1. *Section splitting (33% → 67%).* The first run scored 33% on 3 NVDA
    questions. Inspecting the index showed mis-attributed spans — Item 7 (MD&A)
@@ -78,6 +78,12 @@ option (see below).
 4. *Cross-encoder + eval expansion (re-baselined to 88.9% on 36q).* Added an
    optional cross-encoder reranker, then doubled the eval — which revealed MMR
    still beats it. Details below.
+
+5. *Chained reranker — a measured negative result (86.1%).* Chained the two
+   (cross-encoder relevance → MMR diversity) to try to keep the 1C fix without
+   the diversity losses. It recovers Item 1C but still lands below MMR, and the
+   result is flat across shortlist size *and* λ — so MMR stays the default.
+   Details below.
 
 ### Cross-encoder reranking — and why expanding the eval mattered
 
@@ -106,10 +112,9 @@ resolved it:
 semantic-overlap case (1C) but, by chasing pure relevance, it discards the
 *diversity* MMR provides — so on questions whose answer-section is crowded by a
 dominant section it returns near-duplicate high-relevance chunks from the wrong
-section and misses. So MMR stays the default and the cross-encoder remains a
-selectable option. The evidence-motivated next experiment is to **chain** them
-(cross-encoder for relevance → MMR for diversity) so the 1C fix doesn't cost the
-diversity wins.
+section and misses. The natural fix is to **chain** them — cross-encoder for
+relevance, then MMR for diversity — so the 1C fix doesn't cost the diversity
+wins. I tried exactly that (next section).
 
 This is the whole point of a retrieval eval: the small set *hid* a real
 regression, the larger one *surfaced* it, and the decision (keep MMR) is now
@@ -118,12 +123,44 @@ up too — "liquidity & capital resources" questions (Item 7) get out-ranked by
 cash-flow content in Item 8 under *both* rerankers, which points at
 chunking/labeling rather than reranking.
 
+### Chaining the rerankers — a measured negative result
+
+The chain (`rerank="chain"`) runs the cross-encoder first to score the
+candidates, then feeds those (min-max **normalized**) scores into MMR as the
+*relevance* term while MMR keeps its embedding-cosine diversity penalty. So the
+final ranking trades **cross-encoder relevance** against **embedding diversity** —
+the best-of-both design. (Normalizing matters: the raw cross-encoder logits span
+roughly −11…+11, which would swamp the [0,1] diversity term and silently collapse
+the chain back into pure cross-encoder ranking.)
+
+It does recover Item 1C. But it lands at **86.1% (31/36)** — still below plain
+MMR's 88.9% — and it is **flat across both knobs**: shortlist ∈ {15, 20, 30, 40}
+and λ ∈ {0.2 … 0.9} all give 86.1% with *identical* misses. That flatness is the
+diagnosis. At shortlist = 40 the chain and MMR see the **same** 40 candidates with
+the **same** diversity machinery and the **same** λ — the only difference is the
+relevance signal (cross-encoder score vs. bi-encoder cosine). So the entire
+88.9% → 86.1% gap is attributable to the relevance signal alone, and no tuning
+moves it.
+
+**Why:** `ms-marco-MiniLM` is trained on web-search relevance, not SEC filings.
+It transfers to the one genuine semantic-overlap case (1C) but mis-ranks formal
+disclosure phrasing — it scores the AAPL buyback (Item 5) and MSFT tax-note
+(Item 8) chunks *below* what the bi-encoder gives them, and MMR's diversity can't
+promote a chunk the relevance term has already buried. The chain inherits that
+domain blind spot.
+
+**Conclusion: keep MMR as the default.** An off-the-shelf cross-encoder — even
+chained correctly — does not beat the simpler baseline on this corpus. The
+cross-encoder and chain stay in the codebase as a *measured negative result*; the
+real lever would be **fine-tuning the cross-encoder on filing text** (domain
+adaptation), which is out of scope here.
+
 ## Architecture
 
 ```
 ticker ──> EDGAR API ──> section-aware parse ──> chunk ──> Chroma (local embeddings)
                                                               │
-question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> rerank (MMR | cross-encoder) ──> top 5
+question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> rerank (MMR default | cross-encoder | chain) ──> top 5
                   │                                                            │
                   └──────────────────── cited answer ◄────────────────────────┘
 ```
@@ -133,7 +170,7 @@ question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> r
 | `ingest/edgar.py` | Map ticker → CIK, pull 10-K/10-Q from EDGAR |
 | `ingest/parse.py` | HTML → section-keyed text |
 | `index/build_index.py` | Chunk + embed → Chroma |
-| `retrieval.py` | Two-stage search: over-fetch + rerank (MMR or cross-encoder; shared by eval and agent) |
+| `retrieval.py` | Two-stage search: over-fetch + rerank (MMR default, cross-encoder, or chain; shared by eval and agent) |
 | `agent/tools.py` | `retrieve` tool with citation metadata |
 | `agent/research_agent.py` | Tool-calling agent (Claude) |
 | `eval/evaluate.py` | recall@k retrieval eval |
@@ -170,9 +207,11 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 - "Liquidity & capital resources" questions (Item 7) miss under *both* rerankers
   — "liquidity" lexically matches the cash-flow statement (Item 8) and out-ranks
   the MD&A discussion. This is a chunking/labeling issue, not a reranker one.
-- The cross-encoder fixes pure semantic-overlap (NVDA Item 1C) but underperforms
-  MMR overall (83.3% vs 88.9%) by discarding diversity; chaining the two
-  (relevance then diversity) is the next experiment.
+- Neither the cross-encoder (83.3%) nor the cross-encoder→MMR chain (86.1%) beats
+  plain MMR (88.9%) here. The off-the-shelf `ms-marco` cross-encoder is trained on
+  web search, not filings, so its relevance mis-ranks formal disclosure phrasing
+  (AAPL buybacks, MSFT tax notes); MMR's diversity can't rescue a buried chunk.
+  Domain fine-tuning is the real (out-of-scope) lever.
 - MSFT's iXBRL primary doc extracts thinner than AAPL/NVDA's; a cleaner source
   would be better.
 
@@ -182,7 +221,8 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 - [x] MMR reranking to fix section imbalance (recall@5 76% → 92% on 25q)
 - [x] Cross-encoder reranker (fixes NVDA Item 1C; underperforms MMR on the expanded eval)
 - [x] Expand the eval to 36 questions — revealed MMR (88.9%) > cross-encoder (83.3%)
-- [ ] Chain cross-encoder → MMR (relevance then diversity) to keep the 1C fix without losing diversity
+- [x] Chain cross-encoder → MMR — measured negative result (86.1%, flat across shortlist & λ); MMR stays default
+- [ ] Fine-tune the cross-encoder on filing text (the off-the-shelf model's relevance mis-ranks disclosures)
 - [ ] Fix the Item 7 "liquidity" miss (cash-flow content in Item 8 out-ranks the MD&A)
 - [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL
 - [ ] Add a sources panel in the UI that links to the EDGAR document
