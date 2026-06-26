@@ -57,6 +57,25 @@ EVAL_QUESTIONS = [
     {"q": "What does Microsoft disclose about dividends and share buybacks?",                "ticker": "MSFT", "section": "Item 5"},
     {"q": "What did Microsoft conclude about the effectiveness of its internal controls?",   "ticker": "MSFT", "section": "Item 9A"},
     {"q": "Where does Microsoft describe its cloud and productivity businesses?",            "ticker": "MSFT", "section": "Item 1"},
+
+    # --- Expanded set (round 4): second-angle questions on sections with real
+    # content, labelled by standard 10-K convention (human capital -> Item 1,
+    # liquidity & capital resources -> Item 7, tax notes -> Item 8). NVDA files
+    # its financials under Item 15, so it gets no Item 8 question. Labels are NOT
+    # filtered by whether they pass — that would be teaching to the test.
+    {"q": "How does Nvidia describe its employees and human capital?",                       "ticker": "NVDA", "section": "Item 1"},
+    {"q": "What does Nvidia say about its liquidity, cash flow, and capital resources?",     "ticker": "NVDA", "section": "Item 7"},
+    {"q": "What risks does Nvidia describe related to international operations and regulation?", "ticker": "NVDA", "section": "Item 1A"},
+
+    {"q": "How does Apple describe its employees and human capital?",                        "ticker": "AAPL", "section": "Item 1"},
+    {"q": "What does Apple say about its liquidity and capital resources?",                  "ticker": "AAPL", "section": "Item 7"},
+    {"q": "What risks does Apple describe about its global operations and regulation?",      "ticker": "AAPL", "section": "Item 1A"},
+    {"q": "What do Apple's financial statement notes report about income taxes?",            "ticker": "AAPL", "section": "Item 8"},
+
+    {"q": "How does Microsoft describe its employees and human capital?",                    "ticker": "MSFT", "section": "Item 1"},
+    {"q": "What does Microsoft say about its liquidity and capital resources?",              "ticker": "MSFT", "section": "Item 7"},
+    {"q": "What risks does Microsoft describe about competition in its cloud business?",     "ticker": "MSFT", "section": "Item 1A"},
+    {"q": "What do Microsoft's financial statement notes report about income taxes?",        "ticker": "MSFT", "section": "Item 8"},
 ]
 
 

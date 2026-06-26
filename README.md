@@ -43,18 +43,19 @@ in the top-k? That number is what I tune chunk size and overlap against.
 ### Results
 
 Corpus: two most recent 10-Ks each for NVDA, AAPL, and MSFT (~1,220 chunks).
-Eval: 25 questions, each labelled with the section a correct answer must come
+Eval: 36 questions, each labelled with the section a correct answer must come
 from. Metric is recall@5 — did a chunk from the expected section appear in the
-top-5 retrieved?
+top-5 retrieved? Default retrieval is MMR; the cross-encoder is a selectable
+option (see below).
 
-| Metric | Value |
-|--------|-------|
-| recall@5 (overall) | **92.0% (23/25)** |
-| AAPL | 8/8 |
-| MSFT | 8/8 |
-| NVDA | 7/9 |
+| Metric | MMR (default) | Cross-encoder |
+|--------|--------------|---------------|
+| recall@5 (overall) | **88.9% (32/36)** | 83.3% (30/36) |
+| NVDA | 10/12 | 10/12 |
+| AAPL | 11/12 | 10/12 |
+| MSFT | 11/12 | 10/12 |
 
-**How I got here — three rounds of measure-then-fix:**
+**How I got here — four rounds of measure-then-fix:**
 
 1. *Section splitting (33% → 67%).* The first run scored 33% on 3 NVDA
    questions. Inspecting the index showed mis-attributed spans — Item 7 (MD&A)
@@ -68,23 +69,19 @@ top-5 retrieved?
    because its huge Item 1A (226 chunks) crowded smaller sections out of the
    top-5. The bi-encoder kept returning near-duplicate Item 1A passages.
 
-3. *MMR reranking (76% → 92%).* Added two-stage retrieval — over-fetch 40
+3. *MMR reranking (76% → 92% on 25q).* Added two-stage retrieval — over-fetch 40
    candidates, then re-rank with Maximal Marginal Relevance to trade off
    relevance against diversity (see [`retrieval.py`](retrieval.py)). NVDA rose
    4/9 → 7/9 and MSFT 7/8 → 8/8. Diversity reranking recovered the crowded-out
    sections without me optimizing the section label directly.
 
-The two misses under MMR are both honest:
-- **NVDA Item 1C (cybersecurity).** Its Item 1A talks about cybersecurity *risk*
-  while the question asks about *governance* — a genuine semantic-overlap case
-  the bi-encoder + MMR gets wrong.
-- **NVDA Item 3 (Legal Proceedings).** A one-line stub deferring to a
-  financial-statements note — nothing substantive to retrieve. Kept in the set
-  rather than deleted to inflate the score.
+4. *Cross-encoder + eval expansion (re-baselined to 88.9% on 36q).* Added an
+   optional cross-encoder reranker, then doubled the eval — which revealed MMR
+   still beats it. Details below.
 
-### Cross-encoder reranking — the honest result
+### Cross-encoder reranking — and why expanding the eval mattered
 
-I then added an optional cross-encoder reranker (`rerank="cross"` in
+I added an optional cross-encoder reranker (`rerank="cross"` in
 [`retrieval.py`](retrieval.py)): over-fetch 40 candidates with the bi-encoder,
 then re-score each *(query, chunk)* pair with a cross-encoder
 (`ms-marco-MiniLM-L-6-v2`) that reads query and chunk **together** with full
@@ -92,13 +89,34 @@ attention, and take the top 5. Unlike the bi-encoder it can't precompute a
 reusable vector, so it only runs on the 40-candidate pool — the standard
 two-stage retrieval pattern.
 
-It did exactly what it was designed to: **the NVDA Item 1C semantic-overlap miss
-flipped to a hit.** But aggregate recall@5 held at 92% — it *traded* Item 1C for
-a new AAPL Item 5 (buybacks) miss. On a 25-question set a one-question swing is
-within noise, so I can't claim the cross-encoder moved the metric; I can only
-show it fixed the case it was built for. The real bottleneck is now eval size:
-expanding the question set is the prerequisite to *proving* a reranker gain,
-which is why it's the top item under *Next*.
+On the original 25-question set it looked like a wash: it fixed the **NVDA Item
+1C** semantic-overlap miss but traded it for an **AAPL Item 5** miss, holding at
+92%. A one-question swing on 25 questions is within noise — I couldn't tell
+whether the cross-encoder helped, hurt, or did nothing. So I expanded the eval to
+**36 questions** (second-angle questions on sections with real content, labelled
+by 10-K convention and *not* filtered by whether they pass), and the bigger set
+resolved it:
+
+| Reranker | recall@5 (36q) | Behaviour |
+|----------|---------------|-----------|
+| **MMR (default)** | **88.9% (32/36)** | misses NVDA 1C, NVDA 3 (stub), AAPL & MSFT liquidity (Item 7) |
+| Cross-encoder | 83.3% (30/36) | *fixes* NVDA 1C, but loses AAPL 5, NVDA liquidity, MSFT tax-notes |
+
+**The cross-encoder is actually slightly worse here.** It nails the targeted
+semantic-overlap case (1C) but, by chasing pure relevance, it discards the
+*diversity* MMR provides — so on questions whose answer-section is crowded by a
+dominant section it returns near-duplicate high-relevance chunks from the wrong
+section and misses. So MMR stays the default and the cross-encoder remains a
+selectable option. The evidence-motivated next experiment is to **chain** them
+(cross-encoder for relevance → MMR for diversity) so the 1C fix doesn't cost the
+diversity wins.
+
+This is the whole point of a retrieval eval: the small set *hid* a real
+regression, the larger one *surfaced* it, and the decision (keep MMR) is now
+evidence-based rather than a guess. A separate, reranker-independent miss showed
+up too — "liquidity & capital resources" questions (Item 7) get out-ranked by
+cash-flow content in Item 8 under *both* rerankers, which points at
+chunking/labeling rather than reranking.
 
 ## Architecture
 
@@ -146,20 +164,25 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 - Section splitting is regex-based on "Item N" headers. Some 10-Qs and older
   filings format headers oddly and fall back to a single `full_document`
   section — chunking still works but citations are coarser.
-- The eval set is 25 questions over 3 companies. recall@k is only as meaningful
-  as the labels behind it; broadening coverage is ongoing.
-- The 25-question eval is too small to resolve reranker differences: the
-  cross-encoder fixes the NVDA Item 1C semantic-overlap miss but trades it for
-  AAPL Item 5, so aggregate recall@5 is unchanged at 92%. Expanding the eval so
-  the gain is statistically visible is the real next lever.
-- MSFT's iXBRL primary doc extracts thinner than AAPL/NVDA's; MMR masks it in
-  the eval but a cleaner source would be better.
+- The eval set is 36 questions over 3 companies. recall@k is only as meaningful
+  as the labels behind it; broadening coverage (more companies, more sections)
+  is ongoing.
+- "Liquidity & capital resources" questions (Item 7) miss under *both* rerankers
+  — "liquidity" lexically matches the cash-flow statement (Item 8) and out-ranks
+  the MD&A discussion. This is a chunking/labeling issue, not a reranker one.
+- The cross-encoder fixes pure semantic-overlap (NVDA Item 1C) but underperforms
+  MMR overall (83.3% vs 88.9%) by discarding diversity; chaining the two
+  (relevance then diversity) is the next experiment.
+- MSFT's iXBRL primary doc extracts thinner than AAPL/NVDA's; a cleaner source
+  would be better.
 
 ## Next
 
-- [x] Section-aware splitting + 25-question eval across 3 companies
-- [x] MMR reranking to fix section imbalance (recall@5 76% → 92%)
-- [x] Cross-encoder reranker (fixes NVDA Item 1C; eval too small to show an aggregate gain)
-- [ ] Expand the eval set so reranker gains are statistically visible
+- [x] Section-aware splitting + eval across 3 companies (now 36 questions)
+- [x] MMR reranking to fix section imbalance (recall@5 76% → 92% on 25q)
+- [x] Cross-encoder reranker (fixes NVDA Item 1C; underperforms MMR on the expanded eval)
+- [x] Expand the eval to 36 questions — revealed MMR (88.9%) > cross-encoder (83.3%)
+- [ ] Chain cross-encoder → MMR (relevance then diversity) to keep the 1C fix without losing diversity
+- [ ] Fix the Item 7 "liquidity" miss (cash-flow content in Item 8 out-ranks the MD&A)
 - [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL
 - [ ] Add a sources panel in the UI that links to the EDGAR document
