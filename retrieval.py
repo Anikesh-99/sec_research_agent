@@ -19,7 +19,7 @@ Both the eval and the agent's retrieve tool call search(), so they can't drift.
 
 import numpy as np
 from chromadb.utils import embedding_functions
-
+from sentence_transformers import CrossEncoder
 from index.build_index import get_collection
 
 CANDIDATES = 40       # pool fetched before re-ranking
@@ -27,6 +27,13 @@ LAMBDA_MULT = 0.5     # relevance vs. diversity trade-off
 
 _ef = None
 
+_ce = None
+
+def _cross_encoder():
+    global _ce
+    if _ce is None:
+        _ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _ce
 
 def _embed_query(text: str) -> np.ndarray:
     global _ef
@@ -38,9 +45,8 @@ def _embed_query(text: str) -> np.ndarray:
 def _normalize(v: np.ndarray) -> np.ndarray:
     return v / np.clip(np.linalg.norm(v, axis=-1, keepdims=True), 1e-12, None)
 
-
-def search(query: str, k: int = 5, where: dict | None = None,
-           candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT) -> list[dict]:
+def _mmr_search(query: str, k: int = 5, where: dict | None = None,
+               candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT) -> list[dict]:
     """Return up to k hits as {document, metadata}, MMR-reranked for diversity."""
     res = get_collection().query(
         query_texts=[query],
@@ -75,3 +81,26 @@ def search(query: str, k: int = 5, where: dict | None = None,
         remaining.remove(chosen)
 
     return [{"document": docs[i], "metadata": metas[i]} for i in selected]
+
+def _cross_encoder_search(query: str, k: int = 5, where: dict | None = None,
+               candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT) -> list[dict]:
+    res = get_collection().query(
+        query_texts=[query],
+        n_results=candidates,
+        where=where,
+        include=["documents", "metadatas", "embeddings"]
+    )
+    ce = _cross_encoder()
+    docs = res["documents"][0]
+    meta = res["metadatas"][0]
+    if not docs:
+        return []
+    pairs = [(query, doc) for doc in docs]
+    scores = ce.predict(pairs)
+    chosen = sorted(zip(docs, meta, scores), key=lambda x: x[2], reverse = True)[:k]
+    chosen_docs, chosen_metas = [choice[0] for choice in chosen], [choice[1] for choice in chosen]
+    return [{"document": chosen_docs[i], "metadata": chosen_metas[i]} for i in range(len(chosen))]
+
+def search(query: str, k: int = 5, where: dict | None = None,
+           candidates: int = CANDIDATES, lambda_mult: float = LAMBDA_MULT, rerank: str = "MMR") -> list[dict]:
+    return _mmr_search(query, k, where, candidates, lambda_mult) if rerank == "MMR" else _cross_encoder_search(query, k, where, candidates, lambda_mult)

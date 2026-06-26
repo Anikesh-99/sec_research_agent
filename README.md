@@ -74,21 +74,38 @@ top-5 retrieved?
    4/9 → 7/9 and MSFT 7/8 → 8/8. Diversity reranking recovered the crowded-out
    sections without me optimizing the section label directly.
 
-The two remaining misses are both honest:
+The two misses under MMR are both honest:
 - **NVDA Item 1C (cybersecurity).** Its Item 1A talks about cybersecurity *risk*
   while the question asks about *governance* — a genuine semantic-overlap case
-  the bi-encoder + MMR still gets wrong. A cross-encoder reranker is the likely
-  next lever.
+  the bi-encoder + MMR gets wrong.
 - **NVDA Item 3 (Legal Proceedings).** A one-line stub deferring to a
   financial-statements note — nothing substantive to retrieve. Kept in the set
   rather than deleted to inflate the score.
+
+### Cross-encoder reranking — the honest result
+
+I then added an optional cross-encoder reranker (`rerank="cross"` in
+[`retrieval.py`](retrieval.py)): over-fetch 40 candidates with the bi-encoder,
+then re-score each *(query, chunk)* pair with a cross-encoder
+(`ms-marco-MiniLM-L-6-v2`) that reads query and chunk **together** with full
+attention, and take the top 5. Unlike the bi-encoder it can't precompute a
+reusable vector, so it only runs on the 40-candidate pool — the standard
+two-stage retrieval pattern.
+
+It did exactly what it was designed to: **the NVDA Item 1C semantic-overlap miss
+flipped to a hit.** But aggregate recall@5 held at 92% — it *traded* Item 1C for
+a new AAPL Item 5 (buybacks) miss. On a 25-question set a one-question swing is
+within noise, so I can't claim the cross-encoder moved the metric; I can only
+show it fixed the case it was built for. The real bottleneck is now eval size:
+expanding the question set is the prerequisite to *proving* a reranker gain,
+which is why it's the top item under *Next*.
 
 ## Architecture
 
 ```
 ticker ──> EDGAR API ──> section-aware parse ──> chunk ──> Chroma (local embeddings)
                                                               │
-question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> MMR rerank ──> top 5
+question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> rerank (MMR | cross-encoder) ──> top 5
                   │                                                            │
                   └──────────────────── cited answer ◄────────────────────────┘
 ```
@@ -98,7 +115,7 @@ question ──> agent (Claude) ──> retrieve ──> over-fetch 40 ──> M
 | `ingest/edgar.py` | Map ticker → CIK, pull 10-K/10-Q from EDGAR |
 | `ingest/parse.py` | HTML → section-keyed text |
 | `index/build_index.py` | Chunk + embed → Chroma |
-| `retrieval.py` | Two-stage search: over-fetch + MMR rerank (shared by eval and agent) |
+| `retrieval.py` | Two-stage search: over-fetch + rerank (MMR or cross-encoder; shared by eval and agent) |
 | `agent/tools.py` | `retrieve` tool with citation metadata |
 | `agent/research_agent.py` | Tool-calling agent (Claude) |
 | `eval/evaluate.py` | recall@k retrieval eval |
@@ -131,8 +148,10 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
   section — chunking still works but citations are coarser.
 - The eval set is 25 questions over 3 companies. recall@k is only as meaningful
   as the labels behind it; broadening coverage is ongoing.
-- Bi-encoder + MMR still misses pure semantic-overlap cases (NVDA Item 1C vs
-  1A). A cross-encoder reranker is the next lever.
+- The 25-question eval is too small to resolve reranker differences: the
+  cross-encoder fixes the NVDA Item 1C semantic-overlap miss but trades it for
+  AAPL Item 5, so aggregate recall@5 is unchanged at 92%. Expanding the eval so
+  the gain is statistically visible is the real next lever.
 - MSFT's iXBRL primary doc extracts thinner than AAPL/NVDA's; MMR masks it in
   the eval but a cleaner source would be better.
 
@@ -140,6 +159,7 @@ set `SEC_USER_AGENT` in `.env` or EDGAR will block you.
 
 - [x] Section-aware splitting + 25-question eval across 3 companies
 - [x] MMR reranking to fix section imbalance (recall@5 76% → 92%)
-- [ ] Cross-encoder reranker for semantic-overlap cases (NVDA Item 1C)
+- [x] Cross-encoder reranker (fixes NVDA Item 1C; eval too small to show an aggregate gain)
+- [ ] Expand the eval set so reranker gains are statistically visible
 - [ ] Fall back to the cleaner `.htm` exhibit when the primary doc is iXBRL
 - [ ] Add a sources panel in the UI that links to the EDGAR document

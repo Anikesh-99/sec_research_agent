@@ -60,13 +60,13 @@ EVAL_QUESTIONS = [
 ]
 
 
-def recall_at_k(k: int = 5) -> None:
+def recall_at_k(k: int = 5, rerank='MMR') -> None:
     hits = 0
 
     print(f"{'hit':<4} {'ticker':<6} {'section':<10} question")
     print("-" * 70)
     for item in EVAL_QUESTIONS:
-        results = search(item["q"], k=k, where={"ticker": item["ticker"]})
+        results = search(item["q"], k=k, where={"ticker": item["ticker"]}, rerank=rerank)
         hit = any(h["metadata"].get("section") == item["section"] for h in results)
         hits += int(hit)
         print(f"{'  ✓' if hit else '  ✗':<4} {item['ticker']:<6} {item['section']:<10} {item['q'][:45]}")
@@ -78,3 +78,4 @@ def recall_at_k(k: int = 5) -> None:
 
 if __name__ == "__main__":
     recall_at_k(k=5)
+    recall_at_k(k=5, rerank="cross")

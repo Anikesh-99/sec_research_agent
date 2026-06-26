@@ -2,6 +2,7 @@ anthropic
 langchain
 langchain-anthropic
 chromadb
+sentence-transformers
 beautifulsoup4
 lxml
 requests
